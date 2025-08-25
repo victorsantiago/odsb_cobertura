@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mapa – Cobertura por Arquivo KML (PT-BR popup)</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-omnivore@0.3.4/leaflet-omnivore.min.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    :root{--bg:#fff;--panel:#f5f7fb;--text:#0b1020;--muted:#5b6b82;--border:#e9eef7;}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
+    .app{display:grid;grid-template-rows:auto 1fr;height:100%}
+    header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 14px;background:var(--panel);box-shadow:0 2px 12px rgba(0,0,0,.08);position:sticky;top:0;z-index:1000}
+    header h1{font-size:18px;margin:0}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:14px;color:var(--muted)}
+    .group{display:flex;gap:6px;align-items:center;background:#eef2f9;padding:6px 10px;border-radius:12px}
+    .group b{margin-right:4px;color:#0b1020}
+    .chk{display:flex;gap:6px;align-items:center;padding:3px 6px;border:1px solid #dbe3f0;border-radius:8px;background:#fff}
+    #map{height:100%}
+    .legend{position:absolute;right:10px;bottom:10px;background:#fff; padding:10px 12px;border:1px solid var(--border);border-radius:10px;z-index:600;max-width:320px}
+    .legend h4{margin:0 0 6px;font-size:13px}
+    .legend .row{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:12px}
+    .sw{width:14px;height:14px;border-radius:3px;border:1px solid #cbd5e1}
+    .busy{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.75);color:#fff;padding:8px 12px;border-radius:8px;display:none;z-index:700}
+    .leaflet-popup-content-wrapper{border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.15)}
+    .leaflet-popup-content{margin:12px 16px}
+    table.min{border-collapse:collapse;width:100%;font-size:12px}
+    table.min td{padding:3px 6px;border-bottom:1px solid #eee}
+    .sub{color:#6b7280;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Cobertura Móvel</h1>
+      <div class="controls">
+        <div class="group" id="tecGroup"><b>Tecnologia:</b></div>
+        <div class="group" id="opGroup"><b>Operadora:</b></div>
+      </div>
+    </header>
+    <div id="map"></div>
+  </div>
+
+  <div id="legend" class="legend">
+    <h4>Camadas ativas</h4>
+    <div id="legendItems"></div>
+  </div>
+
+  <div id="busy" class="busy">Carregando…</div>
+
+  <script>
+    const KML_BASE = 'web/kml/';
+    const SINGLE_CSV = 'data/cobertura.csv';
+
+    const TECNOLOGIAS = ['2G','3G','4G','5G','3G4G5G','4G5G'];
+    const OPERADORAS = [
+      {val:'todas', label:'Todas'},
+      {val:'CLARO', label:'Claro'},
+      {val:'VIVO',  label:'Vivo'},
+      {val:'TIM',   label:'TIM'}
+    ];
+
+    function colorFor(key){
+      let h = 0; for (let i=0;i<key.length;i++) h = (h*31 + key.charCodeAt(i)) % 360;
+      return `hsl(${h}, 70%, 50%)`;
+    }
+    const map = L.map('map').setView([-14.2, -51.9], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      maxZoom: 19, attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+    const busy = on => document.getElementById('busy').style.display = on ? 'block' : 'none';
+
+    // ===== Helpers =====
+    function toNumSmart(v){
+      if (v===null || v===undefined || v==='') return null;
+      let s = String(v).trim().replace(/%/g,'');
+
+      // Casos com . e , – decidir separador decimal por padrão comum
+      const hasDot = s.includes('.');
+      const hasComma = s.includes(',');
+
+      if (hasDot && hasComma){
+        // Formatos tipo 1.234,56  -> '.' milhar, ',' decimal
+        if (/^\d{1,3}(\.\d{3})+,\d+$/.test(s)){
+          s = s.replace(/\./g,'').replace(',', '.');
+        }
+        // Formatos tipo 1,234.56 -> ',' milhar, '.' decimal
+        else if (/^\d{1,3}(,\d{3})+\.\d+$/.test(s)){
+          s = s.replace(/,/g,'');
+        } else {
+          // fallback: assume vírgula decimal
+          s = s.replace(/\./g,'').replace(',', '.');
+        }
+      } else if (hasComma && !hasDot){
+        // 90,42 -> 90.42
+        s = s.replace(',', '.');
+      } else {
+        // só ponto ou nenhum: mantém
+      }
+      const f = parseFloat(s);
+      return isNaN(f) ? null : f;
+    }
+
+    const fmtPctBR = v => (v===null || v===undefined)
+      ? '—%'
+      : (Number(v)).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2}) + '%';
+
+    function opDisplay(o){
+      if (!o) return '';
+      if (o === 'todas') return 'Todas';
+      if (o === 'CLARO') return 'Claro';
+      if (o === 'VIVO')  return 'Vivo';
+      if (o === 'TIM')   return 'TIM'; // marca
+      // fallback: capitaliza
+      return o.charAt(0).toUpperCase()+o.slice(1).toLowerCase();
+    }
+
+    function fileKeyFrom(path){
+      const base = String(path).split('/').pop();
+      return base.replace(/\.kml$/i,'').trim().toUpperCase();
+    }
+
+    // UI
+    function buildCheckboxes(){
+      const tecG = document.getElementById('tecGroup');
+      TECNOLOGIAS.forEach(t=>{
+        const id = `tec-${t}`;
+        tecG.insertAdjacentHTML('beforeend', `<label class="chk"><input type="checkbox" id="${id}" data-tec="${t}">${t}</label>`);
+      });
+      const opG = document.getElementById('opGroup');
+      OPERADORAS.forEach(o=>{
+        const id = `op-${o.val}`;
+        opG.insertAdjacentHTML('beforeend', `<label class="chk"><input type="checkbox" id="${id}" data-op="${o.val}">${o.label}</label>`);
+      });
+      tecG.querySelectorAll('input').forEach(el=> el.addEventListener('change', refreshLayers));
+      opG.querySelectorAll('input').forEach(el=> el.addEventListener('change', refreshLayers));
+    }
+
+    // Índice por nome de arquivo (coluna nome)
+    const idxByFile = {};
+    let csvLoaded = false;
+
+    function buildIndex(rows){
+      for (const raw of rows){
+        let fname = raw.nome ?? raw.NOME ?? '';
+        if (!fname) continue;
+        const key = fileKeyFrom(fname);
+        const rec = {
+          area_pct: toNumSmart(raw.area_pct ?? raw['% area coberta'] ?? raw['% Área coberta']),
+          moradores_pct: toNumSmart(raw.moradores_pct ?? raw['% Moradores cobertos']),
+          domicilios_pct: toNumSmart(raw.domicilios_pct ?? raw['% Domicílios cobertos'])
+        };
+        idxByFile[key] = rec;
+      }
+      csvLoaded = true;
+      console.log('idxByFile', idxByFile);
+    }
+
+    function loadCsvOnce(){
+      return new Promise(resolve=>{
+        if (csvLoaded) return resolve();
+        Papa.parse(SINGLE_CSV, {
+          header:true, download:true, dynamicTyping:false,
+          complete: res => { buildIndex(res.data || []); resolve(); },
+          error: () => resolve()
+        });
+      });
+    }
+
+    function getActiveSelections(){
+      const tecs = [...document.querySelectorAll('#tecGroup input:checked')].map(el=>el.dataset.tec);
+      const ops  = [...document.querySelectorAll('#opGroup  input:checked')].map(el=>el.dataset.op);
+      return {tecs, ops};
+    }
+
+    function kmlName(tec, op){ return `${tec}_${op}.kml`; }
+    function comboKey(tec, op){ return `${tec} | ${op}`; }
+
+    const layerByKey = {};
+    const colorByKey = {};
+    const layerByKeyPromises = {};
+
+    async function getLayer(tec, op){
+      const key = comboKey(tec, op);
+      if (layerByKey[key]) return layerByKey[key];
+      if (layerByKeyPromises[key]) return layerByKeyPromises[key];
+
+      const prom = (async ()=>{
+        await loadCsvOnce();
+        const filename = kmlName(tec, op);
+        const fileKey = fileKeyFrom(filename);
+        const file = encodeURI(`${KML_BASE}${filename}`);
+
+        const group = omnivore.kml(file);
+        const color = colorFor(key);
+        colorByKey[key] = color;
+
+        group.on('ready', function(){
+          group.eachLayer(function(lyr){
+            if (lyr.setStyle){
+              lyr.setStyle({ color: color, weight: 1.2, opacity: 0.9, fillColor: color, fillOpacity: 0.20 });
+            }
+            lyr.on('click', (e)=>{
+              const it = idxByFile[fileKey] || null;
+
+              // Título: "5G Claro"
+              const title = `${tec} ${opDisplay(op)}`;
+
+              let html = `<div><b>${title}</b></div>`;
+              //html += `<div class="sub" style="margin:4px 0 8px 0;">${filename}</div>`;
+              html += `<table class="min">
+                <tr><td>% Área coberta</td><td style="text-align:right;">${fmtPctBR(it?.area_pct)}</td></tr>
+                <tr><td>% Moradores cobertos</td><td style="text-align:right;">${fmtPctBR(it?.moradores_pct)}</td></tr>
+                <tr><td>% Domicílios cobertos</td><td style="text-align:right;">${fmtPctBR(it?.domicilios_pct)}</td></tr>
+              </table>`;
+              if (!it){
+                console.warn('Sem match no CSV por arquivo:', fileKey);
+                html += `<div style="margin-top:6px;color:#6b7280"><em>Sem dados para este arquivo no CSV.</em></div>`;
+              }
+              L.popup().setLatLng(e.latlng).setContent(html).openOn(map);
+            });
+          });
+          updateLegend(); fitToActive(); busy(false);
+        });
+
+        group.on('error', function(){ busy(false); alert(`Falha ao carregar ${filename}.`); });
+
+        layerByKey[key] = group;
+        return group;
+      })();
+
+      layerByKeyPromises[key] = prom;
+      return prom;
+    }
+
+    async function refreshLayers(){
+      busy(true);
+      const tecs = [...document.querySelectorAll('#tecGroup input:checked')].map(el=>el.dataset.tec);
+      const ops  = [...document.querySelectorAll('#opGroup  input:checked')].map(el=>el.dataset.op);
+
+      Object.values(layerByKey).forEach(g=>{ if (map.hasLayer(g)) map.removeLayer(g); });
+
+      const tasks = [];
+      for (const t of tecs){
+        for (const o of ops){
+          tasks.push(getLayer(t,o).then(g=>{ if (!map.hasLayer(g)) g.addTo(map); }));
+        }
+      }
+      if (tasks.length===0){ busy(false); updateLegend(); return; }
+      await Promise.all(tasks);
+      updateLegend();
+      busy(false);
+    }
+
+    function fitToActive(){
+      const layers = Object.values(layerByKey).filter(g=> map.hasLayer(g));
+      if (!layers.length) return;
+      try{ map.fitBounds(L.featureGroup(layers).getBounds(), {padding:[20,20]}); }catch(e){}
+    }
+
+    function updateLegend(){
+      const wrap = document.getElementById('legendItems');
+      const active = [];
+      for (const [key,group] of Object.entries(layerByKey)){
+        if (map.hasLayer(group)){ active.push({key, color: colorByKey[key]}); }
+      }
+      wrap.innerHTML = active.length
+        ? active.map(a=>`<div class="row"><span class="sw" style="background:${a.color}"></span><span>${a.key}</span></div>`).join('')
+        : `<div class="row"><em>Nenhuma camada ativa</em></div>`;
+    }
+
+    (function init(){
+      buildCheckboxes();
+      document.querySelector('#tec-4G').checked = true;
+      document.querySelector('#op-todas').checked = true;
+      refreshLayers();
+    })();
+  </script>
+</body>
+</html>
