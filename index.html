@@ -31,6 +31,14 @@
     table.min{border-collapse:collapse;width:100%;font-size:12px}
     table.min td{padding:3px 6px;border-bottom:1px solid #eee}
     .sub{color:#6b7280;font-size:12px}
+  
+    /* KML Regiões controls */
+    .kml-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .kml-item { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; background:#eef2f9; }
+    .kml-swatch { width:14px; height:14px; border-radius:3px; display:inline-block; box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
+    .kml-group { display:flex; gap:8px; align-items:center; }
+    .kml-sep { width:1px; height:20px; background:#dbe3f0; margin:0 4px; }
+
   </style>
 </head>
 <body>
@@ -41,7 +49,16 @@
         <div class="group" id="tecGroup"><b>Tecnologia:</b></div>
         <div class="group" id="opGroup"><b>Operadora:</b></div>
       </div>
-    </header>
+
+    <!-- Controles de Regiões (KML) -->
+    <div class="kml-controls" id="kmlControls">
+      <div class="kml-group">
+        <label class="kml-item"><input type="checkbox" id="kmlAll" checked> <strong>Todos</strong></label>
+        <span class="kml-sep"></span>
+      </div>
+      <div class="kml-group" id="kmlItems"></div>
+    </div>
+</header>
     <div id="map"></div>
   </div>
 
@@ -272,6 +289,88 @@
         ? active.map(a=>`<div class="row"><span class="sw" style="background:${a.color}"></span><span>${a.key}</span></div>`).join('')
         : `<div class="row"><em>Nenhuma camada ativa</em></div>`;
     }
+
+
+    // ====== KMLs (Regiões de Barcarena) ======
+    const REGIONS = [
+      { id: 'barcarena',   name: 'Barcarena',     file: 'web/kml/regioes/barcarena_dissolved_lines.kml',    color: '#7c3aed' },
+      { id: 'estradas',    name: 'Estradas',      file: 'web/kml/regioes/estradas_dissolved_lines.kml',     color: '#2563eb' },
+      { id: 'ilhas',       name: 'Ilhas',         file: 'web/kml/regioes/ilhas_dissolved_lines.kml',        color: '#10b981' },
+      { id: 'murucupi',    name: 'Murucupi',      file: 'web/kml/regioes/murucupi_dissolved_lines.kml',     color: '#f59e0b' },
+      { id: 'viladoconde', name: 'Vila do Conde', file: 'web/kml/regioes/viladoconde_dissolved_lines.kml',  color: '#ef4444' },
+    ];
+    const regionLayers = new Map(); // id -> L.GeoJSON
+    const regionFitGroup = L.featureGroup();
+    function regionStyle(color){ return { color, weight: 3, opacity: 0.9 }; }
+
+    function addRegion(r){
+      if (regionLayers.has(r.id)){
+        const lyr = regionLayers.get(r.id);
+        if (!map.hasLayer(lyr)) lyr.addTo(map);
+        return;
+      }
+      const layer = omnivore.kml(r.file, null, L.geoJSON(null, { style: regionStyle(r.color) }));
+      layer.on('ready', () => {
+        regionFitGroup.addLayer(layer);
+        // Se for o primeiro carregamento, ajusta os bounds
+        if (!map._regionsFitDone){
+          const b = regionFitGroup.getBounds();
+          if (b.isValid()) map.fitBounds(b.pad(0.08));
+          map._regionsFitDone = true;
+        }
+      });
+      layer.addTo(map);
+      regionLayers.set(r.id, layer);
+    }
+    function removeRegion(id){
+      const lyr = regionLayers.get(id);
+      if (lyr){ map.removeLayer(lyr); regionFitGroup.removeLayer(lyr); }
+    }
+
+    const $kmlItems = document.getElementById('kmlItems');
+    const $kmlAll = document.getElementById('kmlAll');
+
+    function renderRegionUI(){
+      $kmlItems.innerHTML = '';
+      REGIONS.forEach(r => {
+        const lbl = document.createElement('label');
+        lbl.className = 'kml-item';
+        lbl.innerHTML = `<span class="kml-swatch" style="background:${r.color}"></span>
+                         <input type="checkbox" data-region="${r.id}" checked> ${r.name}`;
+        $kmlItems.appendChild(lbl);
+      });
+    }
+    function bindRegionEvents(){
+      $kmlItems.querySelectorAll('input[type="checkbox"][data-region]').forEach(chk => {
+        chk.addEventListener('change', (e) => {
+          const id = e.target.getAttribute('data-region');
+          const r = REGIONS.find(x => x.id === id);
+          if (!r) return;
+          if (e.target.checked) addRegion(r); else removeRegion(id);
+          // Atualizar master
+          const all = Array.from($kmlItems.querySelectorAll('input[type="checkbox"][data-region]'));
+          $kmlAll.checked = all.every(i => i.checked);
+        });
+      });
+      $kmlAll.addEventListener('change', (e) => {
+        const checked = e.target.checked;
+        $kmlItems.querySelectorAll('input[type="checkbox"][data-region]').forEach(i => {
+          const id = i.getAttribute('data-region');
+          i.checked = checked;
+          const r = REGIONS.find(x => x.id === id);
+          if (checked) addRegion(r); else removeRegion(id);
+        });
+      });
+    }
+    function initRegions(){
+      renderRegionUI();
+      bindRegionEvents();
+      // Carrega todos inicialmente
+      REGIONS.forEach(addRegion);
+      $kmlAll.checked = true;
+    }
+    if (document.readyState !== 'loading') initRegions();
+    else document.addEventListener('DOMContentLoaded', initRegions);
 
     (function init(){
       buildCheckboxes();
